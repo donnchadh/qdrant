@@ -10,7 +10,8 @@ use collection::operations::types::{
     RecommendRequestInternal, ScrollRequestInternal,
 };
 use collection::operations::universal_query::collection_query::{
-    CollectionPrefetch, CollectionQueryRequest,
+    CollectionPrefetch, CollectionQueryRequest, FeedbackInternal, NearestWithMmr, Query,
+    VectorInputInternal, VectorQuery,
 };
 use segment::data_types::facets::FacetParams;
 
