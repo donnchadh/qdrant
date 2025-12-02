@@ -37,12 +37,87 @@ pub struct EncodedQueryU8 {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Metadata {
+#[serde(untagged)]
+enum Metadata {
+    Int8(MetadataInt8),
+}
+
+impl Metadata {
+    pub fn vector_parameters(&self) -> &VectorParameters {
+        match self {
+            Metadata::Int8(meta) => &meta.vector_parameters,
+        }
+    }
+
+    pub fn actual_dim(&self) -> usize {
+        match self {
+            Metadata::Int8(meta) => meta.actual_dim,
+        }
+    }
+
+    pub fn postprocess_score(&self, score: f32, query_offset: f32, vector_offset: f32) -> f32 {
+        match self {
+            Metadata::Int8(metadata) => {
+                metadata.postprocess_score(score, query_offset, vector_offset)
+            }
+        }
+    }
+
+    pub fn postprocess_internal_score(
+        &self,
+        score: f32,
+        query_offset: f32,
+        vector_offset: f32,
+    ) -> f32 {
+        match self {
+            Metadata::Int8(metadata) => {
+                metadata.postprocess_internal_score(score, query_offset, vector_offset)
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct MetadataInt8 {
     actual_dim: usize,
     alpha: f32,
     offset: f32,
     multiplier: f32,
     vector_parameters: VectorParameters,
+}
+
+impl MetadataInt8 {
+    pub fn encode_value(&self, value: f32) -> u8 {
+        let i = (value - self.offset) / self.alpha;
+        i.clamp(0.0, 127.0) as u8
+    }
+
+    fn postprocess_score(&self, score: f32, query_offset: f32, vector_offset: f32) -> f32 {
+        self.multiplier * score + query_offset + vector_offset
+    }
+
+    fn postprocess_internal_score(&self, score: f32, query_offset: f32, vector_offset: f32) -> f32 {
+        // We store shift in vector constant, in this case we added it twice, so we need to subtract it once
+        self.multiplier * score + query_offset + vector_offset - self.get_shift()
+    }
+
+    fn get_shift(&self) -> f32 {
+        // Dotprod after shifting produces a number which is not related to vector and query
+        // (x - a)(y - a) = xy - ax - ay + a^2
+        // this a^2 is returned here
+        // L2 is handled the same way as Dot here
+        let shift = match self.vector_parameters.distance_type {
+            DistanceType::Dot | DistanceType::L2 => {
+                self.actual_dim as f32 * self.offset * self.offset
+            }
+            DistanceType::L1 => 0.0,
+        };
+        if self.vector_parameters.invert {
+            -shift
+        } else {
+            shift
+        }
+    }
 }
 
 impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
@@ -65,13 +140,13 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
         let actual_dim = Self::get_actual_dim(vector_parameters);
 
         if count == 0 {
-            let metadata = Metadata {
+            let metadata = Metadata::Int8(MetadataInt8 {
                 actual_dim,
                 alpha: 0.0,
                 offset: 0.0,
                 multiplier: 0.0,
                 vector_parameters: vector_parameters.clone(),
-            };
+            });
             if let Some(meta_path) = meta_path {
                 meta_path
                     .parent()
@@ -114,56 +189,6 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
             (alpha, offset)
         };
 
-        for vector in orig_data {
-            if stopped.load(Ordering::Relaxed) {
-                return Err(EncodingError::Stopped);
-            }
-
-            let mut encoded_vector = Vec::with_capacity(actual_dim + std::mem::size_of::<f32>());
-            encoded_vector.extend_from_slice(&f32::default().to_ne_bytes());
-            for &value in vector.as_ref() {
-                let encoded = Self::f32_to_u8(value, alpha, offset);
-                encoded_vector.push(encoded);
-            }
-            if !vector_parameters.dim.is_multiple_of(ALIGNMENT) {
-                for _ in 0..(ALIGNMENT - vector_parameters.dim % ALIGNMENT) {
-                    let placeholder = match vector_parameters.distance_type {
-                        DistanceType::Dot => 0.0,
-                        DistanceType::L1 | DistanceType::L2 => offset,
-                    };
-                    let encoded = Self::f32_to_u8(placeholder, alpha, offset);
-                    encoded_vector.push(encoded);
-                }
-            }
-            let vector_offset = match vector_parameters.distance_type {
-                DistanceType::Dot => {
-                    actual_dim as f32 * offset * offset
-                        + encoded_vector.iter().map(|&x| f32::from(x)).sum::<f32>() * alpha * offset
-                }
-                DistanceType::L1 => 0.0,
-                DistanceType::L2 => {
-                    actual_dim as f32 * offset * offset
-                        + encoded_vector
-                            .iter()
-                            .map(|&x| f32::from(x) * f32::from(x))
-                            .sum::<f32>()
-                            * alpha
-                            * alpha
-                }
-            };
-            let vector_offset = if vector_parameters.invert {
-                -vector_offset
-            } else {
-                vector_offset
-            };
-            encoded_vector[0..std::mem::size_of::<f32>()]
-                .copy_from_slice(&vector_offset.to_ne_bytes());
-            storage_builder
-                .push_vector_data(&encoded_vector)
-                .map_err(|e| {
-                    EncodingError::EncodingError(format!("Failed to push encoded vector: {e}",))
-                })?;
-        }
         let multiplier = match vector_parameters.distance_type {
             DistanceType::Dot => alpha * alpha,
             DistanceType::L1 => alpha,
@@ -175,17 +200,70 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
             multiplier
         };
 
-        let encoded_vectors = storage_builder
-            .build()
-            .map_err(|e| EncodingError::EncodingError(format!("Failed to build storage: {e}",)))?;
-
-        let metadata = Metadata {
+        let metadata = MetadataInt8 {
             actual_dim,
             alpha,
             offset,
             multiplier,
             vector_parameters: vector_parameters.clone(),
         };
+
+        for vector in orig_data {
+            if stopped.load(Ordering::Relaxed) {
+                return Err(EncodingError::Stopped);
+            }
+
+            let mut encoded_vector = Vec::with_capacity(actual_dim + std::mem::size_of::<f32>());
+            encoded_vector.extend_from_slice(&f32::default().to_ne_bytes());
+            for &value in vector.as_ref() {
+                let encoded = metadata.encode_value(value);
+                encoded_vector.push(encoded);
+            }
+            if !vector_parameters.dim.is_multiple_of(ALIGNMENT) {
+                for _ in 0..(ALIGNMENT - vector_parameters.dim % ALIGNMENT) {
+                    let placeholder = match vector_parameters.distance_type {
+                        DistanceType::Dot => 0.0,
+                        DistanceType::L1 | DistanceType::L2 => offset,
+                    };
+                    let encoded = metadata.encode_value(placeholder);
+                    encoded_vector.push(encoded);
+                }
+            }
+            let vector_offset = match vector_parameters.distance_type {
+                DistanceType::Dot => {
+                    let elements_sum = encoded_vector.iter().map(|&x| f32::from(x)).sum::<f32>();
+                    elements_sum * alpha * offset
+                }
+                DistanceType::L1 => 0.0,
+                DistanceType::L2 => {
+                    let elements_sqr_sum = encoded_vector
+                        .iter()
+                        .map(|&x| f32::from(x) * f32::from(x))
+                        .sum::<f32>();
+                    elements_sqr_sum * alpha * alpha
+                }
+            };
+            let vector_offset = if vector_parameters.invert {
+                -vector_offset
+            } else {
+                vector_offset
+            };
+            // apply `a^2` shift
+            let vector_offset = vector_offset + metadata.get_shift();
+            encoded_vector[0..std::mem::size_of::<f32>()]
+                .copy_from_slice(&vector_offset.to_ne_bytes());
+            storage_builder
+                .push_vector_data(&encoded_vector)
+                .map_err(|e| {
+                    EncodingError::EncodingError(format!("Failed to push encoded vector: {e}",))
+                })?;
+        }
+
+        let encoded_vectors = storage_builder
+            .build()
+            .map_err(|e| EncodingError::EncodingError(format!("Failed to build storage: {e}",)))?;
+
+        let metadata = Metadata::Int8(metadata);
         if let Some(meta_path) = meta_path {
             meta_path
                 .parent()
@@ -225,70 +303,164 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
     }
 
     pub fn score_point_simple(&self, query: &EncodedQueryU8, bytes: &[u8]) -> f32 {
-        let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
-        let q_ptr = query.encoded_query.as_ptr();
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
+                let q_ptr = query.encoded_query.as_ptr();
 
-        let score = match self.metadata.vector_parameters.distance_type {
-            DistanceType::Dot | DistanceType::L2 => {
-                impl_score_dot(q_ptr, v_ptr, self.metadata.actual_dim)
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => {
+                        impl_score_dot(q_ptr, v_ptr, metadata.actual_dim)
+                    }
+                    DistanceType::L1 => impl_score_l1(q_ptr, v_ptr, metadata.actual_dim),
+                };
+
+                self.metadata
+                    .postprocess_score(score as f32, query.offset, vector_offset)
             }
-            DistanceType::L1 => impl_score_l1(q_ptr, v_ptr, self.metadata.actual_dim),
-        };
+        }
+    }
 
-        self.metadata.multiplier * score as f32 + query.offset + vector_offset
+    pub fn score_point_simple_internal(&self, i: PointOffsetType, j: PointOffsetType) -> f32 {
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (query_offset, q_ptr) = self.get_vec_ptr(i);
+                let (vector_offset, v_ptr) = self.get_vec_ptr(j);
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => {
+                        impl_score_dot(q_ptr, v_ptr, metadata.actual_dim)
+                    }
+                    DistanceType::L1 => impl_score_l1(q_ptr, v_ptr, metadata.actual_dim),
+                };
+                self.metadata
+                    .postprocess_internal_score(score as f32, query_offset, vector_offset)
+            }
+        }
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     pub fn score_point_neon(&self, query: &EncodedQueryU8, bytes: &[u8]) -> f32 {
-        let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
-        let q_ptr = query.encoded_query.as_ptr();
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
+                let q_ptr = query.encoded_query.as_ptr();
 
-        unsafe {
-            let score = match self.metadata.vector_parameters.distance_type {
-                DistanceType::Dot | DistanceType::L2 => {
-                    impl_score_dot_neon(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-                DistanceType::L1 => {
-                    impl_score_l1_neon(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-            };
-            self.metadata.multiplier * score + query.offset + vector_offset
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_neon(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_neon(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_score(score as f32, query.offset, vector_offset)
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    pub fn score_point_neon_internal(&self, i: PointOffsetType, j: PointOffsetType) -> f32 {
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (query_offset, q_ptr) = self.get_vec_ptr(i);
+                let (vector_offset, v_ptr) = self.get_vec_ptr(j);
+
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_neon(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_neon(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_internal_score(score as f32, query_offset, vector_offset)
+            }
         }
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn score_point_sse(&self, query: &EncodedQueryU8, bytes: &[u8]) -> f32 {
-        let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
-        let q_ptr = query.encoded_query.as_ptr();
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
+                let q_ptr = query.encoded_query.as_ptr();
 
-        unsafe {
-            let score = match self.metadata.vector_parameters.distance_type {
-                DistanceType::Dot | DistanceType::L2 => {
-                    impl_score_dot_sse(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-                DistanceType::L1 => {
-                    impl_score_l1_sse(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-            };
-            self.metadata.multiplier * score + query.offset + vector_offset
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_sse(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_sse(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_score(score as f32, query.offset, vector_offset)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn score_point_sse_internal(&self, i: PointOffsetType, j: PointOffsetType) -> f32 {
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (query_offset, q_ptr) = self.get_vec_ptr(i);
+                let (vector_offset, v_ptr) = self.get_vec_ptr(j);
+
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_sse(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_sse(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_internal_score(score as f32, query_offset, vector_offset)
+            }
         }
     }
 
     #[cfg(target_arch = "x86_64")]
     pub fn score_point_avx(&self, query: &EncodedQueryU8, bytes: &[u8]) -> f32 {
-        let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
-        let q_ptr = query.encoded_query.as_ptr();
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (vector_offset, v_ptr) = Self::parse_vec_data(bytes);
+                let q_ptr = query.encoded_query.as_ptr();
 
-        unsafe {
-            let score = match self.metadata.vector_parameters.distance_type {
-                DistanceType::Dot | DistanceType::L2 => {
-                    impl_score_dot_avx(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-                DistanceType::L1 => {
-                    impl_score_l1_avx(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                }
-            };
-            self.metadata.multiplier * score + query.offset + vector_offset
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_avx(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_avx(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_score(score as f32, query.offset, vector_offset)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn score_point_avx_internal(&self, i: PointOffsetType, j: PointOffsetType) -> f32 {
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (query_offset, q_ptr) = self.get_vec_ptr(i);
+                let (vector_offset, v_ptr) = self.get_vec_ptr(j);
+
+                let score = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot | DistanceType::L2 => unsafe {
+                        impl_score_dot_avx(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                    DistanceType::L1 => unsafe {
+                        impl_score_l1_avx(q_ptr, v_ptr, metadata.actual_dim as u32)
+                    },
+                };
+                self.metadata
+                    .postprocess_internal_score(score as f32, query_offset, vector_offset)
+            }
         }
     }
 
@@ -303,11 +475,6 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
         let alpha = (max - min) / 127.0;
         let offset = min;
         (alpha, offset)
-    }
-
-    fn f32_to_u8(i: f32, alpha: f32, offset: f32) -> u8 {
-        let i = (i - offset) / alpha;
-        i.clamp(0.0, 127.0) as u8
     }
 
     #[inline]
@@ -336,7 +503,7 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
 
     pub fn get_quantized_vector_offset_and_code(&self, i: PointOffsetType) -> (f32, &[u8]) {
         let (offset, v_ptr) = self.get_vec_ptr(i);
-        let vector_data_size = self.metadata.actual_dim;
+        let vector_data_size = self.metadata.actual_dim();
         let code = unsafe { std::slice::from_raw_parts(v_ptr, vector_data_size) };
         (offset, code)
     }
@@ -347,20 +514,57 @@ impl<TStorage: EncodedStorage> EncodedVectorsU8<TStorage> {
     }
 
     pub fn get_multiplier(&self) -> f32 {
-        self.metadata.multiplier
+        match &self.metadata {
+            Metadata::Int8(meta) => meta.multiplier,
+        }
     }
 
-    pub fn get_diff(&self) -> f32 {
-        let diff = self.metadata.actual_dim as f32 * self.metadata.offset * self.metadata.offset;
-        if self.metadata.vector_parameters.invert {
-            -diff
-        } else {
-            diff
+    pub fn get_shift(&self) -> f32 {
+        match &self.metadata {
+            Metadata::Int8(metadata) => metadata.get_shift(),
         }
     }
 
     pub fn get_actual_dim(vector_parameters: &VectorParameters) -> usize {
         vector_parameters.dim + (ALIGNMENT - vector_parameters.dim % ALIGNMENT) % ALIGNMENT
+    }
+
+    fn encode_int8_query(metadata: &MetadataInt8, query: &[f32]) -> EncodedQueryU8 {
+        let dim = query.len();
+        let mut query: Vec<_> = query.iter().map(|&v| metadata.encode_value(v)).collect();
+        if !dim.is_multiple_of(ALIGNMENT) {
+            for _ in 0..(ALIGNMENT - dim % ALIGNMENT) {
+                let placeholder = match metadata.vector_parameters.distance_type {
+                    DistanceType::Dot => 0.0,
+                    DistanceType::L1 | DistanceType::L2 => metadata.offset,
+                };
+                let encoded = metadata.encode_value(placeholder);
+                query.push(encoded);
+            }
+        }
+        let offset = match metadata.vector_parameters.distance_type {
+            DistanceType::Dot => {
+                let query_elements_sum = query.iter().map(|&x| f32::from(x)).sum::<f32>();
+                query_elements_sum * metadata.alpha * metadata.offset
+            }
+            DistanceType::L1 => 0.0,
+            DistanceType::L2 => {
+                let query_elements_sqr_sum = query
+                    .iter()
+                    .map(|&x| f32::from(x) * f32::from(x))
+                    .sum::<f32>();
+                query_elements_sqr_sum * metadata.alpha * metadata.alpha
+            }
+        };
+        let offset = if metadata.vector_parameters.invert {
+            -offset
+        } else {
+            offset
+        };
+        EncodedQueryU8 {
+            offset,
+            encoded_query: query,
+        }
     }
 }
 
@@ -372,46 +576,8 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsU8<TStorage> {
     }
 
     fn encode_query(&self, query: &[f32]) -> EncodedQueryU8 {
-        let dim = query.len();
-        let mut query: Vec<_> = query
-            .iter()
-            .map(|&v| Self::f32_to_u8(v, self.metadata.alpha, self.metadata.offset))
-            .collect();
-        if !dim.is_multiple_of(ALIGNMENT) {
-            for _ in 0..(ALIGNMENT - dim % ALIGNMENT) {
-                let placeholder = match self.metadata.vector_parameters.distance_type {
-                    DistanceType::Dot => 0.0,
-                    DistanceType::L1 | DistanceType::L2 => self.metadata.offset,
-                };
-                let encoded =
-                    Self::f32_to_u8(placeholder, self.metadata.alpha, self.metadata.offset);
-                query.push(encoded);
-            }
-        }
-        let offset = match self.metadata.vector_parameters.distance_type {
-            DistanceType::Dot => {
-                query.iter().map(|&x| f32::from(x)).sum::<f32>()
-                    * self.metadata.alpha
-                    * self.metadata.offset
-            }
-            DistanceType::L1 => 0.0,
-            DistanceType::L2 => {
-                query
-                    .iter()
-                    .map(|&x| f32::from(x) * f32::from(x))
-                    .sum::<f32>()
-                    * self.metadata.alpha
-                    * self.metadata.alpha
-            }
-        };
-        let offset = if self.metadata.vector_parameters.invert {
-            -offset
-        } else {
-            offset
-        };
-        EncodedQueryU8 {
-            offset,
-            encoded_query: query,
+        match &self.metadata {
+            Metadata::Int8(meta) => Self::encode_int8_query(meta, query),
         }
     }
 
@@ -433,109 +599,52 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsU8<TStorage> {
     ) -> f32 {
         hw_counter
             .cpu_counter()
-            .incr_delta(self.metadata.vector_parameters.dim);
+            .incr_delta(self.metadata.vector_parameters().dim);
 
         hw_counter
             .vector_io_read()
-            .incr_delta(self.metadata.vector_parameters.dim * 2);
-
-        let (query_offset, q_ptr) = self.get_vec_ptr(i);
-        let (vector_offset, v_ptr) = self.get_vec_ptr(j);
-        let diff = self.metadata.actual_dim as f32 * self.metadata.offset * self.metadata.offset;
-        let diff = if self.metadata.vector_parameters.invert {
-            -diff
-        } else {
-            diff
-        };
-        let offset = query_offset + vector_offset - diff;
+            .incr_delta(self.metadata.vector_parameters().dim * 2);
 
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            unsafe {
-                let score = match self.metadata.vector_parameters.distance_type {
-                    DistanceType::Dot | DistanceType::L2 => {
-                        impl_score_dot_avx(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                    DistanceType::L1 => {
-                        impl_score_l1_avx(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                };
-
-                return self.metadata.multiplier * score + offset;
-            }
+            return self.score_point_avx_internal(i, j);
         }
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if is_x86_feature_detected!("sse4.1") {
-            unsafe {
-                let score = match self.metadata.vector_parameters.distance_type {
-                    DistanceType::Dot | DistanceType::L2 => {
-                        impl_score_dot_sse(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                    DistanceType::L1 => {
-                        impl_score_l1_sse(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                };
-
-                return self.metadata.multiplier * score + offset;
-            }
+            return self.score_point_sse_internal(i, j);
         }
 
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         if std::arch::is_aarch64_feature_detected!("neon") {
-            unsafe {
-                let score = match self.metadata.vector_parameters.distance_type {
-                    DistanceType::Dot | DistanceType::L2 => {
-                        impl_score_dot_neon(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                    DistanceType::L1 => {
-                        impl_score_l1_neon(q_ptr, v_ptr, self.metadata.actual_dim as u32)
-                    }
-                };
-
-                return self.metadata.multiplier * score + offset;
-            }
+            return self.score_point_neon_internal(i, j);
         }
 
-        let score = match self.metadata.vector_parameters.distance_type {
-            DistanceType::Dot | DistanceType::L2 => {
-                impl_score_dot(q_ptr, v_ptr, self.metadata.actual_dim)
-            }
-            DistanceType::L1 => impl_score_l1(q_ptr, v_ptr, self.metadata.actual_dim),
-        };
-
-        self.metadata.multiplier * score as f32 + offset
+        self.score_point_simple_internal(i, j)
     }
 
     fn quantized_vector_size(&self) -> usize {
         // actual_dim rounds up vector_dimension to the next multiple of ALIGNMENT
         // also add scaling factor to the tally
-        self.metadata.actual_dim + std::mem::size_of::<f32>()
+        const ADDITIONAL_CONSTANT_SIZE: usize = std::mem::size_of::<f32>();
+        match &self.metadata {
+            Metadata::Int8(_) => self.metadata.actual_dim() + ADDITIONAL_CONSTANT_SIZE,
+        }
     }
 
     fn encode_internal_vector(&self, id: PointOffsetType) -> Option<EncodedQueryU8> {
-        let offset_difference = match self.metadata.vector_parameters.distance_type {
-            DistanceType::Dot => {
-                self.metadata.actual_dim as f32 * self.metadata.offset * self.metadata.offset
+        match &self.metadata {
+            Metadata::Int8(metadata) => {
+                let (vector_offset, q_ptr) = self.get_vec_ptr(id);
+                let query_offset = vector_offset - metadata.get_shift();
+                Some(EncodedQueryU8 {
+                    offset: query_offset,
+                    encoded_query: unsafe {
+                        std::slice::from_raw_parts(q_ptr, metadata.actual_dim).to_vec()
+                    },
+                })
             }
-            DistanceType::L1 => 0.0,
-            DistanceType::L2 => {
-                self.metadata.actual_dim as f32 * self.metadata.offset * self.metadata.offset
-            }
-        };
-
-        let (query_offset, q_ptr) = self.get_vec_ptr(id);
-        let query_offset = if self.metadata.vector_parameters.invert {
-            query_offset + offset_difference
-        } else {
-            query_offset - offset_difference
-        };
-        Some(EncodedQueryU8 {
-            offset: query_offset,
-            encoded_query: unsafe {
-                std::slice::from_raw_parts(q_ptr, self.metadata.actual_dim).to_vec()
-            },
-        })
+        }
     }
 
     fn upsert_vector(
@@ -585,9 +694,9 @@ impl<TStorage: EncodedStorage> EncodedVectors for EncodedVectorsU8<TStorage> {
     ) -> f32 {
         hw_counter
             .cpu_counter()
-            .incr_delta(self.metadata.vector_parameters.dim);
+            .incr_delta(self.metadata.vector_parameters().dim);
 
-        debug_assert!(bytes.len() >= std::mem::size_of::<f32>() + self.metadata.actual_dim);
+        debug_assert!(bytes.len() >= std::mem::size_of::<f32>() + self.metadata.actual_dim());
 
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
