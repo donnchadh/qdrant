@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use segment::common::operation_error::{OperationError, OperationResult};
 use segment::index::hnsw_index::num_rayon_threads;
 use segment::types::{QuantizationConfig, SeqNumberType};
-use shard::measurable_rwlock::MeasureWrite;
+use shard::measurable_rwlock::{MeasureRead, MeasureWrite};
 use shard::wal::WalError;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -328,6 +328,9 @@ impl UpdateHandler {
     where
         F: Fn(bool) + Send + Clone + Sync + 'static,
     {
+        // Optimizer creates a proxy segment that doesn't prevent reads, so account it as read.
+        let _measure = MeasureRead::default();
+
         let mut scheduled_segment_ids = HashSet::<_>::default();
         let mut handles = vec![];
         let is_optimization_failed = Arc::new(AtomicBool::new(false));
@@ -404,6 +407,9 @@ impl UpdateHandler {
                         let resource_budget = optimizer_resource_budget.clone();
                         let segments = segments.clone();
                         move |stopped| {
+                            // Optimizer creates a proxy segment that doesn't prevent reads, so account it as read.
+                            let _measure = MeasureRead::default();
+
                             // Track optimizer status
                             let tracker = Tracker::start(optimizer.as_ref().name(), nsi.clone());
                             let tracker_handle = tracker.handle();
@@ -492,6 +498,7 @@ impl UpdateHandler {
         thresholds_config: &OptimizerThresholds,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
     ) -> OperationResult<()> {
+        let _read = MeasureRead::default();
         let no_segment_with_capacity = {
             let segments_read = segments.read();
             segments_read
@@ -511,8 +518,10 @@ impl UpdateHandler {
                     max_vector_size_bytes >= max_segment_size_bytes
                 })
         };
+        std::mem::drop(_read);
 
         if no_segment_with_capacity {
+            let _write = MeasureWrite::default();
             log::debug!("Creating new appendable segment, all existing segments are over capacity");
 
             let segment_config = collection_params
