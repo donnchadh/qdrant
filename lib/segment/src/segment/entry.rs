@@ -533,7 +533,7 @@ impl SegmentEntry for Segment {
     }
 
     fn size_info(&self) -> SegmentInfo {
-        let segment_id = self.segment_id().ok().map(String::from);
+        let segment_id = self.segment_id().ok();
         let num_vectors = self
             .vector_data
             .values()

@@ -182,7 +182,7 @@ impl Segment {
         );
 
         Ok(SegmentManifest {
-            segment_id: segment_id.into(),
+            segment_id,
             segment_version,
             file_versions,
         })
