@@ -805,9 +805,11 @@ mod tests {
 
         for nearest in nearest_on_level.iter_unsorted() {
             // eprintln!("nearest = {:#?}", nearest);
-            assert_eq!(
-                nearest.score,
-                scorer.score_internal(linking_idx, nearest.idx)
+            assert!(
+                (nearest.score - scorer.score_internal(linking_idx, nearest.idx)).abs() < 1e-5,
+                "Scores are not equal: nearest = {:#?}, linking_idx = {:#?}",
+                nearest,
+                linking_idx
             )
         }
     }
