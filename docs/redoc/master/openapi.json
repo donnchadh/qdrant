@@ -12336,6 +12336,10 @@
           "vectors_size_bytes"
         ],
         "properties": {
+          "segment_id": {
+            "type": "string",
+            "nullable": true
+          },
           "segment_type": {
             "$ref": "#/components/schemas/SegmentType"
           },
@@ -12933,9 +12937,8 @@
             "description": "Segment IDs being optimized",
             "type": "array",
             "items": {
-              "type": "integer",
-              "format": "uint",
-              "minimum": 0
+              "type": "string",
+              "nullable": true
             }
           },
           "status": {
