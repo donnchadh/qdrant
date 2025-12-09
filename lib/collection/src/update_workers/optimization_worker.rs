@@ -287,7 +287,8 @@ impl UpdateWorkers {
                     break;
                 }
 
-                let nonoptimal_segment_uuids = segments.read().segment_uuids(&nonoptimal_segment_ids);
+                let nonoptimal_segment_uuids =
+                    segments.read().segment_uuids(&nonoptimal_segment_ids);
 
                 log::debug!(
                     "Optimizer '{}' running on segments: {:?}",
