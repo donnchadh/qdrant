@@ -804,12 +804,9 @@ mod tests {
         assert_eq!(nearest_on_level.len(), graph_links[0][0].len() + 1);
 
         for nearest in nearest_on_level.iter_unsorted() {
-            // eprintln!("nearest = {:#?}", nearest);
             assert!(
                 (nearest.score - scorer.score_internal(linking_idx, nearest.idx)).abs() < 1e-5,
-                "Scores are not equal: nearest = {:#?}, linking_idx = {:#?}",
-                nearest,
-                linking_idx
+                "Scores are not equal: nearest = {nearest:?}, linking_idx = {linking_idx}",
             )
         }
     }
