@@ -101,7 +101,7 @@ impl SnapshotEntry for Segment {
 }
 
 impl Segment {
-    fn segment_id(&self) -> OperationResult<&str> {
+    pub fn segment_id(&self) -> OperationResult<&str> {
         let id = self
             .current_path
             .file_stem()
@@ -122,7 +122,7 @@ impl Segment {
     }
 
     fn get_segment_manifest(&self) -> OperationResult<SegmentManifest> {
-        let segment_id = self.segment_id()?;
+        let segment_id = self.segment_id()?; //
         let segment_version = self.version();
 
         let files = self
