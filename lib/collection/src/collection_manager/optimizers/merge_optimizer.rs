@@ -100,24 +100,11 @@ impl SegmentOptimizer for MergeOptimizer {
     ) -> Vec<SegmentId> {
         let read_segments = segments.read();
 
-        let raw_segments = read_segments
+        let mut candidates = read_segments
             .iter()
             .filter(|(segment_id, segment)| {
                 matches!(segment, LockedSegment::Original(_)) && !excluded_ids.contains(segment_id)
             })
-            .collect_vec();
-
-        if raw_segments.len() <= self.default_segments_number {
-            return vec![];
-        }
-        let max_candidates = raw_segments.len() - self.default_segments_number + 2;
-
-        // Find at least top-3 smallest segments to join.
-        // We need 3 segments because in this case we can guarantee that total segments number will be less
-
-        let candidates: Vec<_> = raw_segments
-            .iter()
-            .cloned()
             .filter_map(|(segment_id, segment)| {
                 let segment_entry = segment.get();
                 let read_segment = segment_entry.read();
@@ -128,31 +115,51 @@ impl SegmentOptimizer for MergeOptimizer {
                         .unwrap_or_default(),
                 ))
             })
-            .sorted_by_key(|(_segment_id, size)| *size)
-            .scan(0, |size_sum, (segment_id, size)| {
-                *size_sum += size; // produce a cumulative sum of segment sizes starting from smallest
-                Some((segment_id, *size_sum))
-            })
-            .take_while(|(_segment_id, size)| {
-                *size
-                    < self
-                        .thresholds_config
-                        .max_segment_size_kb
-                        .saturating_mul(BYTES_IN_KB)
-            })
-            .take(max_candidates)
-            .map(|(sement_id, _size)| sement_id)
-            .collect();
+            .collect_vec();
 
-        if candidates.len() < 3 {
+        if candidates.len() <= self.default_segments_number {
             return vec![];
         }
-        candidates
+        let max_candidates = candidates.len() - self.default_segments_number + 2;
+
+        candidates.sort_by_key(|(_segment_id, size)| *size);
+        candidates.truncate(max_candidates);
+
+        // Find at least top-3 smallest segments to join.
+        // We need 3 segments because in this case we can guarantee that total segments number will be less
+
+        let threshold = self
+            .thresholds_config
+            .max_segment_size_kb
+            .saturating_mul(BYTES_IN_KB);
+
+        let mut candidates: &[(SegmentId, usize)] = &candidates;
+        let first_batch = take_batch(&mut candidates, threshold);
+
+        if first_batch.len() < 3 {
+            return vec![];
+        }
+        first_batch
+            .iter()
+            .map(|(segment_id, _size)| *segment_id)
+            .collect()
     }
 
     fn get_telemetry_counter(&self) -> &Mutex<OperationDurationsAggregator> {
         &self.telemetry_durations_aggregator
     }
+}
+
+/// Takes first N items such that their cumulative size is less than max_size.
+/// Advances the input slice forward and returns the taken batch.
+fn take_batch<'a, Id: Copy>(items: &mut &'a [(Id, usize)], max_size: usize) -> &'a [(Id, usize)] {
+    let it = items.iter().scan(0, |size_sum, &(_segment_id, size)| {
+        *size_sum += size;
+        (*size_sum < max_size).then_some(())
+    });
+    let (batch, rest) = items.split_at(it.count());
+    *items = rest;
+    batch
 }
 
 #[cfg(test)]
@@ -283,5 +290,16 @@ mod tests {
 
         // Check if optimized segments removed from disk
         old_path.into_iter().for_each(|x| assert!(!x.exists()));
+    }
+
+    #[test]
+    fn test_take_batch() {
+        let mut data = &[(1, 10), (2, 20), (3, 30), (4, 40), (5, 50), (6, 60)][..];
+        let batch = take_batch(&mut data, 31);
+        assert_eq!(batch, &[(1, 10), (2, 20)]); // sum = 30
+        let batch = take_batch(&mut data, 31);
+        assert_eq!(batch, &[(3, 30)]); // sum = 30
+        let batch = take_batch(&mut data, 31);
+        assert_eq!(batch, &[]); // sum = 0
     }
 }
