@@ -1,17 +1,15 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use itertools::Itertools;
 use parking_lot::Mutex;
 use segment::common::operation_time_statistics::OperationDurationsAggregator;
+use segment::entry::SegmentEntry;
 use segment::types::{HnswConfig, HnswGlobalConfig, QuantizationConfig, SegmentType};
 
-use crate::collection_manager::holders::segment_holder::{
-    LockedSegment, LockedSegmentHolder, SegmentId,
-};
+use crate::collection_manager::holders::segment_holder::SegmentId;
 use crate::collection_manager::optimizers::segment_optimizer::{
-    OptimizerThresholds, SegmentOptimizer,
+    OptimizationPlanner, OptimizerThresholds, SegmentOptimizer,
 };
 use crate::config::CollectionParams;
 
@@ -93,21 +91,12 @@ impl SegmentOptimizer for MergeOptimizer {
         &self.thresholds_config
     }
 
-    fn check_condition(
-        &self,
-        segments: LockedSegmentHolder,
-        excluded_ids: &HashSet<SegmentId>,
-    ) -> Vec<SegmentId> {
-        let read_segments = segments.read();
-
-        let mut candidates = read_segments
+    fn plan_optimizations(&self, planner: &mut OptimizationPlanner) {
+        let mut candidates = planner
+            .remaining()
             .iter()
-            .filter(|(segment_id, segment)| {
-                matches!(segment, LockedSegment::Original(_)) && !excluded_ids.contains(segment_id)
-            })
-            .filter_map(|(segment_id, segment)| {
-                let segment_entry = segment.get();
-                let read_segment = segment_entry.read();
+            .filter_map(|(&segment_id, segment)| {
+                let read_segment = segment.read();
                 (read_segment.segment_type() != SegmentType::Special).then_some((
                     segment_id,
                     read_segment
@@ -117,8 +106,9 @@ impl SegmentOptimizer for MergeOptimizer {
             })
             .collect_vec();
 
+        // FIXME: in following condition use segment count from planner
         if candidates.len() <= self.default_segments_number {
-            return vec![];
+            return;
         }
         let max_candidates = candidates.len() - self.default_segments_number + 2;
 
@@ -127,6 +117,7 @@ impl SegmentOptimizer for MergeOptimizer {
 
         // Find at least top-3 smallest segments to join.
         // We need 3 segments because in this case we can guarantee that total segments number will be less
+        const MIN_MERGE_SEGMENTS: usize = 3;
 
         let threshold = self
             .thresholds_config
@@ -134,15 +125,11 @@ impl SegmentOptimizer for MergeOptimizer {
             .saturating_mul(BYTES_IN_KB);
 
         let mut candidates: &[(SegmentId, usize)] = &candidates;
-        let first_batch = take_batch(&mut candidates, threshold);
-
-        if first_batch.len() < 3 {
-            return vec![];
+        while let batch = take_batch(&mut candidates, threshold)
+            && batch.len() >= MIN_MERGE_SEGMENTS
+        {
+            planner.plan(batch.iter().map(|(segment_id, _)| *segment_id).collect());
         }
-        first_batch
-            .iter()
-            .map(|(segment_id, _size)| *segment_id)
-            .collect()
     }
 
     fn get_telemetry_counter(&self) -> &Mutex<OperationDurationsAggregator> {
@@ -199,14 +186,14 @@ mod tests {
 
         merge_optimizer.thresholds_config.max_segment_size_kb = 100;
 
-        let check_result_empty =
-            merge_optimizer.check_condition(locked_holder.clone(), &Default::default());
+        let check_result_empty = merge_optimizer.plan_optimizations_for_test(&locked_holder);
 
         assert!(check_result_empty.is_empty());
 
         merge_optimizer.thresholds_config.max_segment_size_kb = 200;
 
-        let check_result = merge_optimizer.check_condition(locked_holder, &Default::default());
+        let check_result = merge_optimizer.plan_optimizations_for_test(&locked_holder);
+        let check_result = check_result.into_iter().exactly_one().unwrap();
 
         assert_eq!(check_result.len(), 3);
     }
@@ -236,9 +223,8 @@ mod tests {
 
         let locked_holder: Arc<RwLock<_>> = Arc::new(RwLock::new(holder));
 
-        let suggested_for_merge =
-            merge_optimizer.check_condition(locked_holder.clone(), &Default::default());
-
+        let suggested_to_merge = merge_optimizer.plan_optimizations_for_test(&locked_holder);
+        let suggested_for_merge = suggested_to_merge.into_iter().exactly_one().unwrap();
         assert_eq!(suggested_for_merge.len(), 4);
 
         for segment_in in &suggested_for_merge {
