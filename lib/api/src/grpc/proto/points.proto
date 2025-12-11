@@ -127,6 +127,7 @@ message UpsertPoints {
   optional ShardKeySelector shard_key_selector = 5; // Option for custom sharding to specify used shard keys
   optional Filter update_filter = 6; // If specified, only points that match this filter will be updated, others will be inserted
   optional uint64 timeout = 7; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 8; // Time limit for waiting for the changes to be applied
 }
 
 message DeletePoints {
@@ -136,6 +137,7 @@ message DeletePoints {
   optional WriteOrdering ordering = 4; // Write ordering guarantees
   optional ShardKeySelector shard_key_selector = 5; // Option for custom sharding to specify used shard keys
   optional uint64 timeout = 6; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 7; // Time limit for waiting for the changes to be applied
 }
 
 message GetPoints {
@@ -157,6 +159,7 @@ message UpdatePointVectors {
   optional ShardKeySelector shard_key_selector = 5; // Option for custom sharding to specify used shard keys
   optional Filter update_filter = 6; // If specified, only points that match this filter will be updated
   optional uint64 timeout = 7; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 8; // Time limit for waiting for the changes to be applied
 }
 
 message PointVectors {
@@ -172,6 +175,7 @@ message DeletePointVectors {
   optional WriteOrdering ordering = 5; // Write ordering guarantees
   optional ShardKeySelector shard_key_selector = 6; // Option for custom sharding to specify used shard keys
   optional uint64 timeout = 7; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 8; // Time limit for waiting for the changes to be applied
 }
 
 message SetPayloadPoints {
@@ -184,6 +188,7 @@ message SetPayloadPoints {
   optional ShardKeySelector shard_key_selector = 7; // Option for custom sharding to specify used shard keys
   optional string key = 8; // Option for indicate property of payload
   optional uint64 timeout = 9; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 10; // Time limit for waiting for the changes to be applied
 }
 
 message DeletePayloadPoints {
@@ -195,6 +200,7 @@ message DeletePayloadPoints {
   optional WriteOrdering ordering = 6; // Write ordering guarantees
   optional ShardKeySelector shard_key_selector = 7; // Option for custom sharding to specify used shard keys
   optional uint64 timeout = 8; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 9; // Time limit for waiting for the changes to be applied
 }
 
 message ClearPayloadPoints {
@@ -204,6 +210,7 @@ message ClearPayloadPoints {
   optional WriteOrdering ordering = 4; // Write ordering guarantees
   optional ShardKeySelector shard_key_selector = 5; // Option for custom sharding to specify used shard keys
   optional uint64 timeout = 6; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 7; // Time limit for waiting for the changes to be applied
 }
 
 enum FieldType {
@@ -225,6 +232,7 @@ message CreateFieldIndexCollection {
   optional PayloadIndexParams field_index_params = 5; // Payload index params.
   optional WriteOrdering ordering = 6; // Write ordering guarantees
   optional uint64 timeout = 7; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 8; // Time limit for waiting for the changes to be applied
 }
 
 message DeleteFieldIndexCollection {
@@ -233,6 +241,7 @@ message DeleteFieldIndexCollection {
   string field_name = 3; // Field name to delete
   optional WriteOrdering ordering = 4; // Write ordering guarantees
   optional uint64 timeout = 5; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 6; // Time limit for waiting for the changes to be applied
 }
 
 message PayloadIncludeSelector {
@@ -886,6 +895,7 @@ message UpdateBatchPoints {
   repeated PointsUpdateOperation operations = 3;
   optional WriteOrdering ordering = 4; // Write ordering guarantees
   optional uint64 timeout = 5; // Timeout for the operation in seconds
+  optional uint64 wait_timeout = 6; // Time limit for waiting for the changes to be applied
 }
 
 // ---------------------------------------------

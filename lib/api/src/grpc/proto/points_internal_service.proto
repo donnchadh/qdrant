@@ -37,6 +37,7 @@ message SyncPoints {
   optional PointId to_id = 5; // End of the sync range
   optional WriteOrdering ordering = 6;
   optional uint64 timeout = 7; // Timeout for the request in seconds
+  optional uint64 wait_timeout = 8; // Time limit for waiting for the changes to be applied
 }
 
 message SyncPointsInternal {
