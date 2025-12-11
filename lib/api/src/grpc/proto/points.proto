@@ -908,6 +908,7 @@ enum UpdateStatus {
   Acknowledged = 1; // Update is received, but not processed yet
   Completed = 2; // Update is applied and ready for search
   ClockRejected = 3; // Internal: update is rejected due to an outdated clock
+  WaitTimeout = 4; // Timeout of awaited operations
 }
 
 message OrderValue {
