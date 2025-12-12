@@ -159,7 +159,7 @@ impl LocalShard {
                         | QueryEnum::RecommendSumScores(_)
                         | QueryEnum::Discover(_)
                         | QueryEnum::Context(_)
-                        | QueryEnum::FeedbackSimple(_) => {}
+                        | QueryEnum::FeedbackNaive(_) => {}
                     };
                     scored_point
                 });

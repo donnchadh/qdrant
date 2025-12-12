@@ -45,9 +45,9 @@ impl FromPyObject<'_, '_> for PyQuery {
                 using,
             }),
 
-            PyQueryInterface::FeedbackSimple { query, using } => {
-                QueryEnum::FeedbackSimple(NamedQuery {
-                    query: FeedbackQueryInternal::from(query),
+            PyQueryInterface::FeedbackNaive { query, using } => {
+                QueryEnum::FeedbackNaive(NamedQuery {
+                    query: NaiveFeedbackQuery::from(query),
                     using,
                 })
             }
@@ -93,9 +93,9 @@ impl<'py> IntoPyObject<'py> for PyQuery {
                 using,
             },
 
-            QueryEnum::FeedbackSimple(NamedQuery { query, using }) => {
-                PyQueryInterface::FeedbackSimple {
-                    query: PyFeedbackSimpleQuery(query),
+            QueryEnum::FeedbackNaive(NamedQuery { query, using }) => {
+                PyQueryInterface::FeedbackNaive {
+                    query: PyFeedbackNaiveQuery(query),
                     using,
                 }
             }
@@ -139,8 +139,8 @@ pub enum PyQueryInterface {
     },
 
     #[pyo3(constructor = (query, using = None))]
-    FeedbackSimple {
-        query: PyFeedbackSimpleQuery,
+    FeedbackNaive {
+        query: PyFeedbackNaiveQuery,
         using: Option<String>,
     },
 }
@@ -253,22 +253,22 @@ impl<'py> IntoPyObject<'py> for &PyContextPair {
     }
 }
 
-#[pyclass(name = "FeedbackSimpleQuery")]
+#[pyclass(name = "FeedbackNaiveQuery")]
 #[derive(Clone, Debug, Into)]
-pub struct PyFeedbackSimpleQuery(FeedbackQueryInternal<VectorInternal, SimpleFeedbackStrategy>);
+pub struct PyFeedbackNaiveQuery(NaiveFeedbackQuery<VectorInternal>);
 
 #[pymethods]
-impl PyFeedbackSimpleQuery {
+impl PyFeedbackNaiveQuery {
     #[new]
     pub fn new(
         target: PyNamedVectorInternal,
         feedback: Vec<PyFeedbackItem>,
-        strategy: PySimpleFeedbackStrategy,
+        strategy: PyNaiveFeedbackStrategy,
     ) -> Self {
-        Self(FeedbackQueryInternal {
+        Self(NaiveFeedbackQuery {
             target: VectorInternal::from(target),
             feedback: PyFeedbackItem::peel_vec(feedback),
-            strategy: SimpleFeedbackStrategy::from(strategy),
+            coefficients: NaiveFeedbackCoefficients::from(strategy),
         })
     }
 
@@ -283,8 +283,8 @@ impl PyFeedbackSimpleQuery {
     }
 
     #[getter]
-    pub fn strategy(&self) -> PySimpleFeedbackStrategy {
-        PySimpleFeedbackStrategy(self.0.strategy)
+    pub fn strategy(&self) -> PyNaiveFeedbackStrategy {
+        PyNaiveFeedbackStrategy(self.0.coefficients)
     }
 }
 
@@ -324,15 +324,15 @@ impl<'py> IntoPyObject<'py> for &PyFeedbackItem {
     }
 }
 
-#[pyclass(name = "SimpleFeedbackStrategy")]
+#[pyclass(name = "NaiveFeedbackStrategy")]
 #[derive(Copy, Clone, Debug, Into)]
-pub struct PySimpleFeedbackStrategy(SimpleFeedbackStrategy);
+pub struct PyNaiveFeedbackStrategy(NaiveFeedbackCoefficients);
 
 #[pymethods]
-impl PySimpleFeedbackStrategy {
+impl PyNaiveFeedbackStrategy {
     #[new]
     pub fn new(a: f32, b: f32, c: f32) -> Self {
-        Self(SimpleFeedbackStrategy {
+        Self(NaiveFeedbackCoefficients {
             a: OrderedFloat(a),
             b: OrderedFloat(b),
             c: OrderedFloat(c),
